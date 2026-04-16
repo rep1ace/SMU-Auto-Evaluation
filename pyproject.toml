@@ -5,7 +5,8 @@ description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.14.2",
-    "ddddocr>=1.5.6",
+    "numpy>=2.3.3",
+    "onnxruntime>=1.23.1",
     "pillow>=11.3.0",
     "pycryptodome>=3.23.0",
     "requests>=2.32.5",

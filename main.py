@@ -4,12 +4,13 @@ import json
 import logging
 import re
 from io import BytesIO
-import ddddocr
 from hashlib import md5
 from PIL import Image
 from bs4 import BeautifulSoup
 import requests
 import random
+
+from captcha_predictor import predict_captcha
 
 captcha_url = "https://uis.smu.edu.cn/imageServlet.do"
 login_url = "https://uis.smu.edu.cn/login/login.do"
@@ -76,8 +77,7 @@ def get_captcha(session):
         session, "get", captcha_url, headers=headers_captcha
     )
     img = Image.open(BytesIO(captcha_response.content))
-    ocr = ddddocr.DdddOcr(beta=True)
-    result = ocr.classification(img)
+    result = predict_captcha(img)
     return result
 
 

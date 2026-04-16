@@ -18,6 +18,7 @@ pip install uv
 ```
 uv sync
 ```
+项目已内置验证码识别模型。请保留 `models/captcha_model.onnx` 与 `models/captcha_model.onnx.data` 这两个文件，它们需要同时存在。
 ## 3. 更改config.ini
 
  配置文件格式：
@@ -44,5 +45,3 @@ Win+R 运行
 * **勾选[如果过了计划开始时间，立即启动任务]**
 
  # Enjoy
-
-

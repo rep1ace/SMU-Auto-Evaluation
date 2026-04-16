@@ -1,2 +1,3 @@
 *.ini
 config.ini
+.DS_Store
