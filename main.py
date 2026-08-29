@@ -9,6 +9,7 @@ from PIL import Image
 from bs4 import BeautifulSoup
 import requests
 import random
+from pathlib import Path
 
 from captcha_predictor import predict_captcha
 
@@ -26,15 +27,6 @@ headers = {
     "Upgrade-Insecure-Requests": "1",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
 }
-
-logging.basicConfig(
-    filename="evaluation.log",
-    filemode="w",
-    format="%(asctime)s | %(levelname)s:  %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    level=logging.INFO,
-)
-
 
 def request_with_retry(session, method, url, **kwargs):
     timeout = kwargs.pop("timeout", REQUEST_TIMEOUT)
@@ -133,7 +125,7 @@ def redirect_login(session, ticket):
         "ticket": ticket,
     }
     resp = request_with_retry(session, "get", url, headers=headers, params=params)
-    print(resp.status_code)
+    logging.info("教务系统跳转登录状态: %s", resp.status_code)
 
 
 def evaluate_course(session, teadm, dgksdm, ktpj):
@@ -151,7 +143,8 @@ def evaluate_course(session, teadm, dgksdm, ktpj):
         if "entss.post" in script.text:
             matches = re.findall(r"(\w+):'([^']+)'", script.text)
             data = {match[0]: match[1] for match in matches}
-            print(
+            logging.info(
+                "课程信息: %s %s %s %s %s",
                 data["teaxm"],
                 data["kcrwdm"],
                 data["kcptdm"],
@@ -250,11 +243,11 @@ def evaluate_course(session, teadm, dgksdm, ktpj):
         "dt": json_output,
     }
     logging.info("开始提交评课: teadm=%s dgksdm=%s ktpj=%s", teadm, dgksdm, ktpj)
-    print(f"正在提交评课: {data['teaxm']} {data['kcdm']}")
+    logging.info("正在提交评课: %s %s", data["teaxm"], data["kcdm"])
     response = request_with_retry(
         session, "post", save_url, data=dataa, headers=headers
     )
-    print(f"评课提交完成: {data['teaxm']} {data['kcdm']}")
+    logging.info("评课提交完成: %s %s", data["teaxm"], data["kcdm"])
     logging.info(response.text)
 
 
@@ -292,6 +285,7 @@ def get_courses(session):
     today = datetime.now().date()
     query_dates = [today, today - timedelta(days=1)]
     processed_courses = set()
+    evaluated_count = 0
 
     for query_date in query_dates:
         for course in get_pending_courses_by_date(session, query_date):
@@ -308,13 +302,14 @@ def get_courses(session):
 
             processed_courses.add(course_key)
             evaluate_course(session, course["teadm"], course["dgksdm"], course["ktpj"])
+            evaluated_count += 1
+    return evaluated_count
 
 
-def main():
-    config = configparser.ConfigParser()
-    config.read("config.ini")
-    account = config.get("login", "account")
-    password = config.get("login", "password")
+def run_evaluation(account: str, password: str) -> int:
+    """运行一次原脚本任务；除凭据由调用方传入外，流程与原 main 完全一致。"""
+    if not account or not password:
+        raise ValueError("账号或密码为空")
     attempt = 5
     session = None
     ticket = "failed"
@@ -327,7 +322,26 @@ def main():
     if session is None or ticket == "failed":
         raise RuntimeError("登录失败，已达到最大重试次数")
     redirect_login(session, ticket)
-    get_courses(session)
+    return get_courses(session)
+
+
+def configure_cli_logging() -> None:
+    logging.basicConfig(
+        filename=Path(__file__).resolve().parent / "evaluation.log",
+        filemode="w",
+        format="%(asctime)s | %(levelname)s:  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        level=logging.INFO,
+    )
+
+
+def main():
+    configure_cli_logging()
+    config = configparser.ConfigParser()
+    config.read(Path(__file__).resolve().parent / "config.ini", encoding="utf-8")
+    account = config.get("login", "account")
+    password = config.get("login", "password")
+    run_evaluation(account, password)
 
 
 if __name__ == "__main__":

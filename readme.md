@@ -1,47 +1,40 @@
-# 南方医科大学自动评课脚本
-如题，实现南医教务课程自动评价。支持小范围的随机打分。
-# 使用方法
-# 环境配置
-## 1. 安装uv
-windows终端运行
-```
-powershell -c "irm https://astral.sh/uv/install.ps1 | more"
-```
-或
-```
-pip install uv
-```
-执行完毕后，关闭终端窗口然后重新打开
-## 2. 配置uv环境
-1. 下载解压项目文件： 项目主页 - 绿色Code按钮 - Download Zip 
-2. 打开解压后的文件夹，在空白处单击右键-在终端中打开，然后运行
-```
-uv sync
-```
-项目已内置验证码识别模型。请保留 `models/captcha_model.onnx` 与 `models/captcha_model.onnx.data` 这两个文件，它们需要同时存在。
-## 3. 更改config.ini
+# 南方医科大学自动评课
 
- 配置文件格式：
+一个常驻 Windows 系统托盘的自动评课工具。安装后无需打开命令行，程序会随 Windows 登录自动启动，并在每天设定的时间检查当天与前一天的待评课程。
+
+## 普通用户：一键安装
+
+1. 从项目 Releases 下载 `南医自动评课-安装程序.exe`，双击并按向导安装。
+2. 安装完成后程序会出现在右下角系统托盘；首次启动会自动打开设置。
+3. 填写统一身份认证账号、密码和每日运行时间，点击“保存”。
+
+关闭设置窗口不会退出程序。右键托盘图标可以立即运行、修改设置、打开日志或退出。配置和日志保存在 `%APPDATA%\SMU Auto Evaluation`，不会因升级或卸载程序文件而丢失。若暂时看不到图标，请在任务栏的“隐藏的图标”中查找。
+
+> 凭据仅写入当前 Windows 用户的本地配置文件，不会发送到教务系统之外的服务。请保护好自己的 Windows 账户和配置目录。
+
+## 工作方式
+
+- 使用统一身份认证登录，内置 ONNX 模型自动识别验证码。
+- 每天按设置时间查询当天和前一天尚未评价的课程。
+- 网络或登录错误会写入日志，并通过 Windows 通知提示；托盘进程继续运行，下一天会再次尝试。
+- 安装程序使用当前用户权限安装，并通过 Windows `Run` 启动项实现无黑框自启动。
+
+## 开发与构建
+
+要求 Python 3.11+ 与 [uv](https://docs.astral.sh/uv/)。
+
+```powershell
+uv sync --group dev
+uv run pytest
+uv run python tray_app.py
 ```
- [login]
-account=你的账号
-password=你的密码
+
+生成免 Python 环境的一键安装包还需安装 Inno Setup 6，然后在 PowerShell 执行：
+
+```powershell
+./build.ps1
 ```
-**至此环境配置已经完成，你可以在文件夹目录中终端运行`uv run main.py`测试程序是否正常运行**
-# 定时任务设置
-Win+R 运行
 
-     taskschd.msc
-### 点击 操作 - 创建任务
-触发器选项卡:
- * 按预定计划-每天 时间最好选早一些比如00:01
+产物位于 `dist-installer`。推送 `v*` 标签或手动运行 GitHub Actions 中的 **Build Windows installer** 也会构建可下载的安装包。
 
-操作选项卡:
-* 程序或脚本：选择 下载目录\SMU-Auto-Evaluation-Master\.venv\Scripts\python.exe
-* 添加参数: main.py
-* 起始于: 下载目录\SMU-Auto-Evaluation-Master（脚本所在目录）
-
-设置选项卡：
-* **勾选[如果过了计划开始时间，立即启动任务]**
-
- # Enjoy
+项目内置验证码模型；源码运行时请保留 `models/captcha_model.onnx` 与 `models/captcha_model.onnx.data`。

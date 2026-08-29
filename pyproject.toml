@@ -1,7 +1,7 @@
 [project]
 name = "smu-auto-evaluation"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "Windows tray application for SMU automatic course evaluation"
 requires-python = ">=3.11"
 dependencies = [
     "beautifulsoup4>=4.14.2",
@@ -10,7 +10,25 @@ dependencies = [
     "pillow>=11.3.0",
     "pycryptodome>=3.23.0",
     "requests>=2.32.5",
-    "lxml>=6.0.2"
+    "lxml>=6.0.2",
+    "pystray>=0.19.5"
 ]
 [tool.uv]
 index-url = "https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+build = ["pyinstaller>=6.0", "pytest>=8.0"]
+
+[project.scripts]
+smu-auto-evaluation = "tray_app:main"
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["main", "captcha_predictor", "tray_app"]
+
+[tool.setuptools.packages.find]
+include = ["smu_auto_evaluation*"]

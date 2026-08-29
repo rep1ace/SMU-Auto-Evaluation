@@ -2,6 +2,7 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+import sys
 
 _predictor = None
 
@@ -11,9 +12,8 @@ class CaptchaPredictor:
         import onnxruntime as ort
 
         if model_path is None:
-            model_path = str(
-                Path(__file__).resolve().parent / "models" / "captcha_model.onnx"
-            )
+            root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+            model_path = str(root / "models" / "captcha_model.onnx")
 
         model_file = Path(model_path)
         model_data_file = model_file.with_name(f"{model_file.name}.data")

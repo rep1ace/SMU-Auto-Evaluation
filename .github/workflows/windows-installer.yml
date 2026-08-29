@@ -1,0 +1,20 @@
+name: Build Windows installer
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+      - name: Build application and installer
+        shell: powershell
+        run: ./build.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SMU-Auto-Evaluation-Windows
+          path: dist-installer/*.exe
