@@ -4,6 +4,7 @@ import argparse
 import logging
 import threading
 import os
+from queue import Empty, Queue
 from datetime import datetime
 from pathlib import Path
 
@@ -36,6 +37,12 @@ class TrayApplication:
         self.schedule_changed = threading.Event()
         self.run_lock = threading.Lock()
         self.schedule_state = ScheduleState(app_data_dir() / "schedule-state.json")
+        # Tk must be used only by the thread that created its root window.  The
+        # tray callback can run on another thread, so it communicates with the
+        # settings thread through this queue instead of touching Tk directly.
+        self._settings_lock = threading.Lock()
+        self._settings_thread: threading.Thread | None = None
+        self._settings_commands: Queue[str] | None = None
         self.last_status = "等待运行"
         self.icon = pystray.Icon(APP_NAME, self._make_icon(), APP_NAME, self._menu())
         self.background = background
@@ -114,43 +121,98 @@ class TrayApplication:
                 continue
 
     def open_settings(self, first_run: bool = False) -> None:
-        threading.Thread(target=self._settings_window, args=(first_run,), daemon=True).start()
+        with self._settings_lock:
+            if self._settings_thread and self._settings_thread.is_alive():
+                assert self._settings_commands is not None
+                self._settings_commands.put("show")
+                return
 
-    def _settings_window(self, first_run: bool) -> None:
+            commands: Queue[str] = Queue()
+            thread = threading.Thread(
+                target=self._settings_window,
+                args=(first_run, commands),
+                daemon=True,
+                name="settings-window",
+            )
+            self._settings_commands = commands
+            self._settings_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            with self._settings_lock:
+                if self._settings_thread is thread:
+                    self._settings_thread = None
+                    self._settings_commands = None
+            raise
+
+    def _settings_window(self, first_run: bool, commands: Queue[str]) -> None:
         import tkinter as tk
         from tkinter import messagebox, ttk
 
-        settings = Settings.load()
-        root = tk.Tk()
-        root.title(f"{APP_NAME} - 设置")
-        root.resizable(False, False)
-        root.attributes("-topmost", True)
-        frame = ttk.Frame(root, padding=18)
-        frame.grid()
-        values = [tk.StringVar(value=settings.account), tk.StringVar(value=settings.password), tk.StringVar(value=settings.run_time)]
-        for row, label in enumerate(("账号", "密码", "每日运行时间")):
-            ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=6)
-            ttk.Entry(frame, textvariable=values[row], width=30, show="*" if row == 1 else "").grid(row=row, column=1, pady=6)
-        startup = tk.BooleanVar(value=settings.run_at_startup)
-        ttk.Checkbutton(frame, text="开机后自动在托盘运行", variable=startup).grid(row=3, columnspan=2, sticky="w", pady=8)
+        root = None
+        try:
+            settings = Settings.load()
+            root = tk.Tk()
+            root.title(f"{APP_NAME} - 设置")
+            root.resizable(False, False)
+            root.attributes("-topmost", True)
+            frame = ttk.Frame(root, padding=18)
+            frame.grid()
+            values = [
+                tk.StringVar(master=root, value=settings.account),
+                tk.StringVar(master=root, value=settings.password),
+                tk.StringVar(master=root, value=settings.run_time),
+            ]
+            for row, label in enumerate(("账号", "密码", "每日运行时间")):
+                ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=6)
+                ttk.Entry(frame, textvariable=values[row], width=30, show="*" if row == 1 else "").grid(row=row, column=1, pady=6)
+            startup = tk.BooleanVar(master=root, value=settings.run_at_startup)
+            ttk.Checkbutton(frame, text="开机后自动在托盘运行", variable=startup).grid(row=3, columnspan=2, sticky="w", pady=8)
 
-        def save():
-            updated = Settings(values[0].get(), values[1].get(), values[2].get(), startup.get())
-            try:
-                updated.save()
-                set_startup(updated.run_at_startup)
-            except Exception as exc:
-                messagebox.showerror("无法保存", str(exc), parent=root)
-                return
-            self.settings = updated
-            self.schedule_changed.set()
-            messagebox.showinfo("保存成功", "设置已保存。程序会继续在系统托盘后台运行。", parent=root)
-            root.destroy()
+            def save():
+                updated = Settings(values[0].get(), values[1].get(), values[2].get(), startup.get())
+                try:
+                    updated.save()
+                    set_startup(updated.run_at_startup)
+                except Exception as exc:
+                    messagebox.showerror("无法保存", str(exc), parent=root)
+                    return
+                self.settings = updated
+                self.schedule_changed.set()
+                messagebox.showinfo("保存成功", "设置已保存。程序会继续在系统托盘后台运行。", parent=root)
+                root.destroy()
 
-        ttk.Button(frame, text="保存", command=save).grid(row=4, column=1, sticky="e", pady=(10, 0))
-        if first_run:
-            root.protocol("WM_DELETE_WINDOW", root.destroy)
-        root.mainloop()
+            ttk.Button(frame, text="保存", command=save).grid(row=4, column=1, sticky="e", pady=(10, 0))
+
+            def process_commands() -> None:
+                try:
+                    while True:
+                        command = commands.get_nowait()
+                        if command == "close":
+                            root.destroy()
+                            return
+                        if command == "show":
+                            root.deiconify()
+                            root.lift()
+                            root.focus_force()
+                except Empty:
+                    pass
+                root.after(50, process_commands)
+
+            root.after(50, process_commands)
+            root.mainloop()
+        except Exception:
+            logging.exception("设置窗口异常")
+            if root is not None:
+                try:
+                    root.destroy()
+                except Exception:
+                    pass
+        finally:
+            with self._settings_lock:
+                if self._settings_commands is commands:
+                    self._settings_thread = None
+                    self._settings_commands = None
 
     def open_log(self) -> None:
         import os
@@ -166,6 +228,13 @@ class TrayApplication:
     def quit(self) -> None:
         self.stop_event.set()
         self.schedule_changed.set()
+        with self._settings_lock:
+            settings_thread = self._settings_thread
+            commands = self._settings_commands
+        if settings_thread and settings_thread.is_alive() and commands:
+            commands.put("close")
+            if settings_thread is not threading.current_thread():
+                settings_thread.join(timeout=2)
         self.icon.stop()
 
     def run(self) -> None:
