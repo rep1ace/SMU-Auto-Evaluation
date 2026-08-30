@@ -15,6 +15,10 @@ from pathlib import Path
 RETRY_DELAY = timedelta(minutes=15)
 IN_PROGRESS_TIMEOUT = timedelta(hours=2)
 MAX_AUTOMATIC_ATTEMPTS = 3
+# Windows does not count time spent in low-power states towards some thread
+# waits.  Keep the scheduler's waits short so it rechecks the wall clock soon
+# after a resume instead of waiting for the pre-sleep remainder to expire.
+SCHEDULE_RECHECK_INTERVAL = timedelta(seconds=60)
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,12 @@ def next_run(now: datetime, run_time: str) -> datetime:
     if candidate <= now:
         candidate += timedelta(days=1)
     return candidate
+
+
+def schedule_wait_seconds(now: datetime, wake_at: datetime) -> float:
+    """Return a bounded scheduler wait, based on the current wall clock."""
+    remaining = max(0.0, (wake_at - now).total_seconds())
+    return min(remaining, SCHEDULE_RECHECK_INTERVAL.total_seconds())
 
 
 class ScheduleState:

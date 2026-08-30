@@ -6,8 +6,10 @@ from smu_auto_evaluation.scheduler import (
     IN_PROGRESS_TIMEOUT,
     RETRY_DELAY,
     MAX_AUTOMATIC_ATTEMPTS,
+    SCHEDULE_RECHECK_INTERVAL,
     ScheduleState,
     next_run,
+    schedule_wait_seconds,
 )
 from smu_auto_evaluation.settings import Settings
 
@@ -92,3 +94,29 @@ def test_only_current_day_is_caught_up_after_long_downtime(tmp_path):
 
     assert slot is not None
     assert slot.date == "2026-09-03"
+
+
+def test_scheduler_rechecks_soon_after_sleep_crosses_daily_time(tmp_path):
+    state = ScheduleState(tmp_path / "schedule-state.json")
+    before_sleep = datetime(2026, 8, 30, 23, 50)
+    target = state.next_wakeup(before_sleep, "00:10")
+
+    assert target == datetime(2026, 8, 31, 0, 10)
+    assert schedule_wait_seconds(before_sleep, target) == SCHEDULE_RECHECK_INTERVAL.total_seconds()
+
+    # Simulate the next polling wake-up occurring after a long suspend.  The
+    # loop must re-read the current time and claim the missed slot immediately.
+    after_resume = datetime(2026, 8, 31, 8, 0)
+    slot = state.claim_due_run(after_resume, "00:10")
+
+    assert slot is not None
+    state.finish(slot, True, after_resume)
+    assert state.claim_due_run(after_resume, "00:10") is None
+
+
+def test_scheduler_wait_does_not_run_early_when_waking_before_target():
+    now = datetime(2026, 8, 30, 23, 50)
+    target = datetime(2026, 8, 31, 0, 10)
+
+    assert schedule_wait_seconds(now, target) == SCHEDULE_RECHECK_INTERVAL.total_seconds()
+    assert schedule_wait_seconds(target - timedelta(seconds=30), target) == 30

@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 import pystray
 
 from main import run_evaluation
-from smu_auto_evaluation.scheduler import ScheduleState, ScheduledRun
+from smu_auto_evaluation.scheduler import ScheduleState, ScheduledRun, schedule_wait_seconds
 from smu_auto_evaluation.settings import APP_NAME, Settings, app_data_dir
 from smu_auto_evaluation.startup import set_startup
 
@@ -106,14 +106,12 @@ class TrayApplication:
                     self._run_scheduled(scheduled_run)
                     continue
                 target = self.schedule_state.next_wakeup(now, settings.run_time)
-                wait_seconds = max(1, (target - now).total_seconds())
+                wait_seconds = schedule_wait_seconds(now, target)
             except ValueError:
-                wait_seconds = 300
+                wait_seconds = 60
             if self.schedule_changed.wait(wait_seconds):
                 self.schedule_changed.clear()
                 continue
-            if not self.stop_event.is_set():
-                self.run_now()
 
     def open_settings(self, first_run: bool = False) -> None:
         threading.Thread(target=self._settings_window, args=(first_run,), daemon=True).start()
