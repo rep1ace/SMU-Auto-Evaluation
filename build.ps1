@@ -9,8 +9,8 @@ if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
 
 uv sync --group build
 uv run pyinstaller --noconfirm --clean --windowed --name SMUAutoEvaluation `
-    --collect-all pystray --hidden-import PIL._tkinter_finder `
-    --add-data "models;models" tray_app.py
+    --icon "assets\icon.ico" --collect-all pystray --hidden-import PIL._tkinter_finder `
+    --add-data "models;models" --add-data "assets;assets" tray_app.py
 
 $iscc = Get-Command ISCC.exe -ErrorAction SilentlyContinue
 if (-not $iscc) {

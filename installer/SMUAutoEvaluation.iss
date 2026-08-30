@@ -14,6 +14,7 @@ OutputBaseFilename=南医自动评课-安装程序
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\assets\icon.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Files]

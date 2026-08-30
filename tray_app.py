@@ -4,11 +4,12 @@ import argparse
 import logging
 import threading
 import os
+import sys
 from queue import Empty, Queue
 from datetime import datetime
 from pathlib import Path
 
-from PIL import Image, ImageDraw
+from PIL import Image
 import pystray
 
 from main import run_evaluation
@@ -17,6 +18,12 @@ from smu_auto_evaluation.settings import APP_NAME, Settings, app_data_dir
 from smu_auto_evaluation.startup import set_startup
 
 _instance_mutex = None
+
+
+def bundled_resource(path: str) -> Path:
+    """Return an asset path in development and in a PyInstaller bundle."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return root / path
 
 
 def acquire_single_instance() -> bool:
@@ -49,11 +56,8 @@ class TrayApplication:
 
     @staticmethod
     def _make_icon() -> Image.Image:
-        image = Image.new("RGBA", (64, 64), "#2563eb")
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((5, 5, 59, 59), radius=12, fill="#2563eb")
-        draw.text((16, 15), "SM", fill="white")
-        return image
+        with Image.open(bundled_resource("assets/icon.png")) as image:
+            return image.convert("RGBA")
 
     def _menu(self):
         return pystray.Menu(

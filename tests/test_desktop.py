@@ -28,6 +28,49 @@ def test_settings_round_trip(tmp_path):
     assert Settings.load(path) == Settings("student", "secret", "01:05", False)
 
 
+@pytest.mark.parametrize(
+    "password",
+    ["abc%123", "abc%%123", " secret ", "密码含有中文"],
+)
+def test_settings_preserves_password_exactly(tmp_path, password):
+    path = tmp_path / "config.ini"
+
+    Settings("student", password, "01:05", False).save(path)
+
+    assert Settings.load(path).password == password
+    assert password not in path.read_text(encoding="utf-8")
+
+
+def test_settings_loads_legacy_escaped_percent_password_and_migrates_it(tmp_path):
+    path = tmp_path / "config.ini"
+    path.write_text(
+        "[login]\naccount = student\npassword = abc%%123\n"
+        "[schedule]\ntime = 01:05\n"
+        "[general]\nrun_at_startup = false\n",
+        encoding="utf-8",
+    )
+
+    settings = Settings.load(path)
+
+    assert settings == Settings("student", "abc%123", "01:05", False)
+    settings.save(path)
+    assert Settings.load(path) == settings
+
+
+def test_invalid_encoded_password_does_not_echo_its_contents(tmp_path):
+    path = tmp_path / "config.ini"
+    secret = "this must not appear in an error"
+    path.write_text(
+        "[login]\npassword = " + secret + "\npassword_encoding = base64-utf8\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        Settings.load(path)
+
+    assert secret not in str(exc_info.value)
+
+
 def test_invalid_time():
     with pytest.raises(ValueError):
         Settings("student", "secret", "25:00").validate()
