@@ -1,8 +1,14 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytest
 
-from smu_auto_evaluation.scheduler import next_run
+from smu_auto_evaluation.scheduler import (
+    IN_PROGRESS_TIMEOUT,
+    RETRY_DELAY,
+    MAX_AUTOMATIC_ATTEMPTS,
+    ScheduleState,
+    next_run,
+)
 from smu_auto_evaluation.settings import Settings
 
 
@@ -23,3 +29,66 @@ def test_settings_round_trip(tmp_path):
 def test_invalid_time():
     with pytest.raises(ValueError):
         Settings("student", "secret", "25:00").validate()
+
+
+def test_starting_after_daily_time_claims_todays_catch_up(tmp_path):
+    state = ScheduleState(tmp_path / "schedule-state.json")
+    now = datetime(2026, 8, 30, 9, 0)
+
+    slot = state.claim_due_run(now, "00:10")
+
+    assert slot is not None
+    assert slot.date == "2026-08-30"
+    assert slot.run_time == "00:10"
+
+
+def test_starting_before_daily_time_does_not_claim_run(tmp_path):
+    state = ScheduleState(tmp_path / "schedule-state.json")
+    now = datetime(2026, 8, 30, 0, 9)
+
+    assert state.claim_due_run(now, "00:10") is None
+    assert state.next_wakeup(now, "00:10") == datetime(2026, 8, 30, 0, 10)
+
+
+def test_successful_catch_up_is_not_repeated_after_restart(tmp_path):
+    path = tmp_path / "schedule-state.json"
+    now = datetime(2026, 8, 30, 9, 0)
+    state = ScheduleState(path)
+    slot = state.claim_due_run(now, "00:10")
+    assert slot is not None
+    state.finish(slot, True, now)
+
+    assert ScheduleState(path).claim_due_run(now, "00:10") is None
+
+
+def test_failed_run_uses_delayed_bounded_retries(tmp_path):
+    state = ScheduleState(tmp_path / "schedule-state.json")
+    now = datetime(2026, 8, 30, 9, 0)
+
+    for attempt in range(MAX_AUTOMATIC_ATTEMPTS):
+        slot = state.claim_due_run(now, "00:10")
+        assert slot is not None
+        state.finish(slot, False, now)
+        assert state.claim_due_run(now, "00:10") is None
+        if attempt < MAX_AUTOMATIC_ATTEMPTS - 1:
+            now += RETRY_DELAY
+
+    assert state.claim_due_run(now + RETRY_DELAY, "00:10") is None
+
+
+def test_stale_in_progress_slot_can_be_recovered_after_timeout(tmp_path):
+    state = ScheduleState(tmp_path / "schedule-state.json")
+    now = datetime(2026, 8, 30, 9, 0)
+    assert state.claim_due_run(now, "00:10") is not None
+
+    assert state.claim_due_run(now + IN_PROGRESS_TIMEOUT - timedelta(seconds=1), "00:10") is None
+    assert state.claim_due_run(now + IN_PROGRESS_TIMEOUT, "00:10") is not None
+
+
+def test_only_current_day_is_caught_up_after_long_downtime(tmp_path):
+    state = ScheduleState(tmp_path / "schedule-state.json")
+
+    slot = state.claim_due_run(datetime(2026, 9, 3, 9, 0), "00:10")
+
+    assert slot is not None
+    assert slot.date == "2026-09-03"

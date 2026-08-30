@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 import pystray
 
 from main import run_evaluation
-from smu_auto_evaluation.scheduler import next_run
+from smu_auto_evaluation.scheduler import ScheduleState, ScheduledRun
 from smu_auto_evaluation.settings import APP_NAME, Settings, app_data_dir
 from smu_auto_evaluation.startup import set_startup
 
@@ -35,6 +35,7 @@ class TrayApplication:
         self.stop_event = threading.Event()
         self.schedule_changed = threading.Event()
         self.run_lock = threading.Lock()
+        self.schedule_state = ScheduleState(app_data_dir() / "schedule-state.json")
         self.last_status = "等待运行"
         self.icon = pystray.Icon(APP_NAME, self._make_icon(), APP_NAME, self._menu())
         self.background = background
@@ -69,7 +70,10 @@ class TrayApplication:
             return
         threading.Thread(target=self._execute, daemon=True).start()
 
-    def _execute(self) -> None:
+    def _run_scheduled(self, slot: ScheduledRun) -> None:
+        threading.Thread(target=self._execute, args=(slot,), daemon=True).start()
+
+    def _execute(self, scheduled_run: ScheduledRun | None = None) -> None:
         with self.run_lock:
             self.last_status = "正在运行…"
             self.icon.update_menu()
@@ -77,21 +81,32 @@ class TrayApplication:
                 current = Settings.load()
                 current.validate()
                 count = run_evaluation(current.account, current.password)
+                if scheduled_run:
+                    self.schedule_state.finish(scheduled_run, True, datetime.now())
                 self.last_status = f"上次运行成功：{datetime.now():%m-%d %H:%M}"
                 self.notify(f"任务完成，共处理 {count} 门待评课程。")
             except Exception as exc:
                 logging.exception("自动评课失败")
+                if scheduled_run:
+                    self.schedule_state.finish(scheduled_run, False, datetime.now())
                 self.last_status = f"运行失败：{datetime.now():%m-%d %H:%M}"
                 self.notify(f"运行失败：{exc}")
             finally:
                 self.icon.update_menu()
+                if scheduled_run:
+                    self.schedule_changed.set()
 
     def _schedule_loop(self) -> None:
         while not self.stop_event.is_set():
             settings = Settings.load()
             try:
-                target = next_run(datetime.now(), settings.run_time)
-                wait_seconds = max(1, (target - datetime.now()).total_seconds())
+                now = datetime.now()
+                scheduled_run = self.schedule_state.claim_due_run(now, settings.run_time)
+                if scheduled_run:
+                    self._run_scheduled(scheduled_run)
+                    continue
+                target = self.schedule_state.next_wakeup(now, settings.run_time)
+                wait_seconds = max(1, (target - now).total_seconds())
             except ValueError:
                 wait_seconds = 300
             if self.schedule_changed.wait(wait_seconds):
