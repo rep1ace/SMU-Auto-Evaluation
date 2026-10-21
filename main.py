@@ -170,19 +170,15 @@ def evaluate_course(session, teadm, dgksdm, ktpj, *, state=None, before_submit=N
     save_url = "https://zhjw.smu.edu.cn/new/student/ktpj/savePj"
     questions = soup.find_all("div", class_="question")
     data_list = []
+    rating_questions = []
     count = 0
-    combinations = [
-        [2, 2, 0],
-        [1, 2, 1],
-        [0, 4, 0],
-        [1, 3, 0],
-    ]  # [25分选项个数，20分选项个数，15分选项个数]
-    combination = random.choice(combinations).copy()
     option = [-1, -2, -3]
     scores = [25, 20, 15]
     dtjgs = ["★★★★★", "★★★★", "★★★"]
     score_total = 0
     for question in questions:
+        if count == 5:
+            break
         txdm = int(str(question.get("data-txdm", "0")))
         zbdm = str(question.get("data-zbdm", ""))
         title = question.find("h3")
@@ -191,42 +187,48 @@ def evaluate_course(session, teadm, dgksdm, ktpj, *, state=None, before_submit=N
             if title
             else ""
         )
+        answer = {"txdm": txdm, "zbdm": zbdm, "zbmc": zbmc}
         # 对于选择题和非选择题的处理
         if question.find("div", class_="raty"):
             # 处理有评分选项的问题
-            if not any(combination):
-                raise RuntimeError("评分题目数量与问卷结构不符")
-            val = random.choice([i for i, remaining in enumerate(combination) if remaining])
-            combination[val] -= 1
             raty_div = question.find("div", class_="raty")
             if raty_div is None:
                 continue
             options = json.loads(str(raty_div.get("data-wtxm", "[]")))
-            zbxmdm = options[option[val]]["zbxmdm"]  # 比较满意
-            fz = scores[val]
-            dtjg = dtjgs[val]
-            score_total += fz
+            rating_questions.append((answer, options))
         elif question.find("input", type="radio") and txdm != 3:
             # 处理选择题，例如是/否的单选题
             radio_inputs = question.find_all("input", type="radio")
-            zbxmdm = radio_inputs[-1]["value"]
-            fz = 0
-            dtjg = "否"
+            answer.update(zbxmdm=radio_inputs[-1]["value"], fz=0, dtjg="否")
         else:
             continue
-        if count == 5:
-            break
-        data_list.append(
-            {
-                "txdm": txdm,
-                "zbdm": zbdm,
-                "zbmc": zbmc,
-                "zbxmdm": zbxmdm,
-                "fz": fz,
-                "dtjg": dtjg,
-            }
-        )
+        data_list.append(answer)
         count += 1
+
+    # 枚举有限的星级方案，确保实际提交的评分总和在 80–90 分之间。
+    rating_count = len(rating_questions)
+    rating_plans = [
+        [0] * five + [1] * four + [2] * (rating_count - five - four)
+        for five in range(rating_count + 1)
+        for four in range(rating_count - five + 1)
+        if 80 <= 25 * five + 20 * four + 15 * (rating_count - five - four) <= 90
+    ]
+    if not rating_plans:
+        logging.error(
+            "有效星级题数量为 %s，无法生成 80–90 分的评分方案，课程未提交: teadm=%s",
+            rating_count,
+            teadm,
+        )
+        raise RuntimeError("无法生成 80–90 分的评分方案")
+    ratings = random.choice(rating_plans)
+    random.shuffle(ratings)
+    for (answer, options), val in zip(rating_questions, ratings):
+        answer.update(
+            zbxmdm=options[option[val]]["zbxmdm"],
+            fz=scores[val],
+            dtjg=dtjgs[val],
+        )
+        score_total += scores[val]
 
     # 将数据列表转换为JSON格式
     json_output = json.dumps(data_list, ensure_ascii=False, indent=4)

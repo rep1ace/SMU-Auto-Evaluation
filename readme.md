@@ -43,6 +43,10 @@ uv run python tray_app.py
 ./build.ps1
 ```
 
-产物位于 `dist-installer`。推送 `v*` 标签或手动运行 GitHub Actions 中的 **Build Windows installer** 也会构建可下载的安装包。
+产物位于 `dist-installer`；指定安装包版本可运行 `./build.ps1 -Version 1.0.1`。
+
+发布新版本：在 GitHub **Actions → Build and publish Windows release → Run workflow** 中选择要发布的分支，填写尚未使用的版本标签（如 `v1.0.1`）。工作流通过测试后，会自动编译 Windows 安装包、为本次构建的提交创建标签，并发布附带安装包和自动生成说明的 GitHub Release。安装包版本会同步为 `1.0.1`。
+
+也可推送 `v1.2.3` 格式的标签触发同一发布流程。已有 Release 不会被覆盖；测试或编译失败时不会发布，构建产物同时保存在工作流的 Artifacts 中。
 
 项目内置验证码模型；源码运行时请保留 `models/captcha_model.onnx` 与 `models/captcha_model.onnx.data`。
