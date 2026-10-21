@@ -14,6 +14,12 @@ from smu_auto_evaluation.scheduler import (
 from smu_auto_evaluation.settings import Settings
 
 
+@pytest.fixture(autouse=True)
+def zero_daily_offset(monkeypatch):
+    # Existing tests exercise catch-up/retry behavior at the earliest boundary.
+    monkeypatch.setattr("smu_auto_evaluation.scheduler.random.randint", lambda low, high: 0)
+
+
 def test_next_run_today():
     assert next_run(datetime(2026, 1, 2, 8, 0), "09:30") == datetime(2026, 1, 2, 9, 30)
 
@@ -142,6 +148,8 @@ def test_only_current_day_is_caught_up_after_long_downtime(tmp_path):
 def test_scheduler_rechecks_soon_after_sleep_crosses_daily_time(tmp_path):
     state = ScheduleState(tmp_path / "schedule-state.json")
     before_sleep = datetime(2026, 8, 30, 23, 50)
+    today = state.claim_due_run(before_sleep, "00:10")
+    state.finish(today, True, before_sleep)
     target = state.next_wakeup(before_sleep, "00:10")
 
     assert target == datetime(2026, 8, 31, 0, 10)

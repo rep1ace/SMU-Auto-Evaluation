@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import random
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +19,7 @@ from .evaluation_state import atomic_write
 RETRY_DELAY = timedelta(minutes=15)
 IN_PROGRESS_TIMEOUT = timedelta(hours=2)
 MAX_AUTOMATIC_ATTEMPTS = 3
+DAILY_DELAY_SECONDS = (0, 30 * 60)
 # Windows does not count time spent in low-power states towards some thread
 # waits.  Keep the scheduler's waits short so it rechecks the wall clock soon
 # after a resume instead of waiting for the pre-sleep remainder to expire.
@@ -59,7 +62,8 @@ def schedule_wait_seconds(now: datetime, wake_at: datetime) -> float:
 class ScheduleState:
     """Persisted status for automatic daily runs.
 
-    Only today's slot is eligible for a catch-up.  This prevents a computer
+    Only targets falling today are eligible for a catch-up. This includes a
+    previous evening's daily slot delayed past midnight, but prevents a computer
     that was off for several days from replaying stale evaluations.  Completed
     slots are retained briefly so a restart cannot repeat today's work.
     """
@@ -109,15 +113,58 @@ class ScheduleState:
             if not isinstance(record, dict) or str(record.get("date", "")) < oldest:
                 del self._slots[key]
 
+    def _daily_target(self, now: datetime, run_time: str) -> tuple[ScheduledRun, datetime]:
+        slot, base = self._slot(now, run_time)
+        with self._lock:
+            self._prune(now)
+            record = self._slots.get(slot.key)
+            if isinstance(record, dict) and "target_at" in record:
+                target = datetime.fromisoformat(str(record["target_at"]))
+                if not base <= target <= base + timedelta(seconds=DAILY_DELAY_SECONDS[1]):
+                    raise ValueError("每日任务的随机运行时间超出有效范围")
+                return slot, target
+            if isinstance(record, dict):
+                # Upgrades must preserve the retry/completion state of a slot
+                # which already started under the old, unshifted schedule.
+                target = base
+            else:
+                target = base + timedelta(seconds=random.randint(*DAILY_DELAY_SECONDS))
+                record = {"date": slot.date, "run_time": run_time,
+                          "status": "pending", "attempts": 0}
+            record["target_at"] = self._timestamp(target)
+            self._slots[slot.key] = record
+            self._write()
+            logging.info("每日评课计划: 设定=%s 实际=%s", slot.key, self._timestamp(target))
+            return slot, target
+
+    def _daily_candidates(self, now: datetime, run_time: str) -> list[tuple[ScheduledRun, datetime]]:
+        candidates = [self._daily_target(now, run_time)]
+        previous, _ = self._slot(now - timedelta(days=1), run_time)
+        with self._lock:
+            record = self._slots.get(previous.key)
+            if isinstance(record, dict) and isinstance(record.get("target_at"), str):
+                target = datetime.fromisoformat(record["target_at"])
+                if target.date() == now.date():
+                    candidates.insert(0, (previous, target))
+        return candidates
+
     def claim_due_run(self, now: datetime, run_time: str) -> ScheduledRun | None:
-        """Atomically claim today's due automatic run, if it is eligible."""
-        slot, target = self._slot(now, run_time)
-        return self.claim_target(now, slot.run_time, target)
+        """Claim a daily run at its persisted, randomly delayed target."""
+        for slot, target in self._daily_candidates(now, run_time):
+            claimed = self._claim_target(now, slot, target)
+            if claimed is not None:
+                return claimed
+        return None
 
     def claim_target(self, now: datetime, name: str, target: datetime) -> ScheduledRun | None:
         """Claim a persisted course retry or evening job using the same retry budget."""
         slot = ScheduledRun(now.date().isoformat(), name)
-        if target.date() != now.date() or now < target:
+        if target.date() != now.date():
+            return None
+        return self._claim_target(now, slot, target)
+
+    def _claim_target(self, now: datetime, slot: ScheduledRun, target: datetime) -> ScheduledRun | None:
+        if now < target:
             return None
         with self._lock:
             self._prune(now)
@@ -137,6 +184,7 @@ class ScheduleState:
                 attempts = 0
 
             self._slots[slot.key] = {
+                **(record if isinstance(record, dict) else {}),
                 "date": slot.date,
                 "run_time": slot.run_time,
                 "status": "in_progress",
@@ -165,7 +213,9 @@ class ScheduleState:
         with self._lock:
             changed = False
             for record in self._slots.values():
-                if (isinstance(record, dict) and record.get("date") == now.date().isoformat()
+                if (isinstance(record, dict)
+                        and (record.get("date") == now.date().isoformat()
+                             or str(record.get("target_at", "")).startswith(now.date().isoformat() + "T"))
                         and record.get("status") == "in_progress"):
                     record["status"] = "failed"
                     attempts = record.get("attempts", 1)
@@ -177,6 +227,9 @@ class ScheduleState:
 
     def target_wakeup(self, now: datetime, name: str, target: datetime) -> datetime | None:
         slot = ScheduledRun(now.date().isoformat(), name)
+        return self._target_wakeup(now, slot, target)
+
+    def _target_wakeup(self, now: datetime, slot: ScheduledRun, target: datetime) -> datetime | None:
         with self._lock:
             record = self._slots.get(slot.key)
             if isinstance(record, dict):
@@ -194,7 +247,10 @@ class ScheduleState:
 
     def next_wakeup(self, now: datetime, run_time: str) -> datetime:
         """Return the next scheduled time or an eligible retry time."""
-        slot, target = self._slot(now, run_time)
-        if slot.key not in self._slots:
-            return next_run(now, run_time)
-        return self.target_wakeup(now, slot.run_time, target) or next_run(now, run_time)
+        wakeups = [wake for slot, target in self._daily_candidates(now, run_time)
+                   if (wake := self._target_wakeup(now, slot, target)) is not None]
+        if wakeups:
+            return min(wakeups)
+        # Persist tomorrow's offset too, so repeated polling does not move it.
+        _, target = self._daily_target(now + timedelta(days=1), run_time)
+        return target
