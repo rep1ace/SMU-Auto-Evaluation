@@ -226,3 +226,81 @@ def test_settings_window_binds_values_to_its_root_and_saves_visible_values(monke
     assert Root.instances[0].lifted
     assert Root.instances[0].focused
     assert Root.instances[0].destroyed
+
+
+def execution_application(module):
+    app = make_application(module)
+    app.run_lock = threading.Lock()
+    app.schedule_state = None
+    app.icon = types.SimpleNamespace(update_menu=lambda: None)
+    app.notifications = []
+    app.notify = lambda message: app.notifications.append(message)
+    return app
+
+
+def queued_threads(monkeypatch, module):
+    queued = []
+    class Thread:
+        def __init__(self, *, target, args=(), **kwargs):
+            self.target = target
+            self.args = args
+        def start(self):
+            queued.append(self)
+    monkeypatch.setattr(module.threading, 'Thread', Thread)
+    return queued
+
+
+def test_rapid_manual_clicks_do_not_queue_duplicate_evaluations(monkeypatch, tray_app_module):
+    module = tray_app_module
+    app = execution_application(module)
+    queued = queued_threads(monkeypatch, module)
+    monkeypatch.setattr(module.Settings, 'load', lambda: module.Settings('first', 'secret'))
+    calls = []
+    monkeypatch.setattr(module, 'run_evaluation', lambda account, password: calls.append(account) or 1)
+    monkeypatch.setattr(module.EvaluationState, 'for_account', lambda _: types.SimpleNamespace(snapshot=lambda: {'pending': {}}))
+    app.run_now()
+    app.run_now()
+    assert len(queued) == 1
+    assert app.run_lock.locked()
+    assert any('正在运行' in notice for notice in app.notifications)
+    queued[0].target(*queued[0].args)
+    assert calls == ['first']
+    assert not app.run_lock.locked()
+
+
+def test_scheduled_worker_keeps_claimed_account_and_schedule(monkeypatch, tray_app_module):
+    module = tray_app_module
+    app = execution_application(module)
+    queued = queued_threads(monkeypatch, module)
+    records = []
+    original = types.SimpleNamespace(finish=lambda *args: records.append(args))
+    app.schedule_state = original
+    current = module.Settings('original-account', 'original-password')
+    from smu_auto_evaluation.scheduler import ScheduledRun
+    slot = ScheduledRun('2026-10-21', 'evening')
+    app._run_scheduled(slot, current)
+    monkeypatch.setattr(module.Settings, 'load', lambda: module.Settings('other-account', 'other-password'))
+    app.schedule_state = types.SimpleNamespace(finish=lambda *args: pytest.fail('wrong schedule'))
+    accounts = []
+    monkeypatch.setattr(module, 'run_evaluation', lambda account, password: accounts.append((account, password)) or 0)
+    monkeypatch.setattr(module.EvaluationState, 'for_account', lambda _: types.SimpleNamespace(snapshot=lambda: {'pending': {}}))
+    queued[0].target(*queued[0].args)
+    assert accounts == [('original-account', 'original-password')]
+    assert len(records) == 1
+    assert records[0][0:2] == (slot, True)
+    assert not app.run_lock.locked()
+
+
+def test_thread_start_failure_releases_reserved_run_lock(monkeypatch, tray_app_module):
+    module = tray_app_module
+    app = execution_application(module)
+    monkeypatch.setattr(module.Settings, 'load', lambda: module.Settings('account', 'password'))
+    class FailingThread:
+        def __init__(self, **kwargs):
+            pass
+        def start(self):
+            raise RuntimeError('cannot start')
+    monkeypatch.setattr(module.threading, 'Thread', FailingThread)
+    app.run_now()
+    assert not app.run_lock.locked()
+    assert app.schedule_changed.is_set()

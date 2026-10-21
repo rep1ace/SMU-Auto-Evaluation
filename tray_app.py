@@ -6,13 +6,14 @@ import threading
 import os
 import sys
 from queue import Empty, Queue
-from datetime import datetime
+from datetime import timedelta
 from pathlib import Path
 
 from PIL import Image
 import pystray
 
 from main import run_evaluation
+from smu_auto_evaluation.evaluation_state import EvaluationState, local_now
 from smu_auto_evaluation.scheduler import ScheduleState, ScheduledRun, schedule_wait_seconds
 from smu_auto_evaluation.settings import APP_NAME, Settings, app_data_dir
 from smu_auto_evaluation.startup import set_startup
@@ -43,7 +44,8 @@ class TrayApplication:
         self.stop_event = threading.Event()
         self.schedule_changed = threading.Event()
         self.run_lock = threading.Lock()
-        self.schedule_state = ScheduleState(app_data_dir() / "schedule-state.json")
+        self._schedule_account = None
+        self.schedule_state = None
         # Tk must be used only by the thread that created its root window.  The
         # tray callback can run on another thread, so it communicates with the
         # settings thread through this queue instead of touching Tk directly.
@@ -76,53 +78,110 @@ class TrayApplication:
             logging.info("通知不可用: %s", message)
 
     def run_now(self) -> None:
-        if self.run_lock.locked():
+        self._start_execution()
+
+    def _run_scheduled(self, slot: ScheduledRun, settings: Settings) -> None:
+        self._start_execution(settings, slot)
+
+    def _start_execution(self, settings: Settings | None = None,
+                         scheduled_run: ScheduledRun | None = None) -> bool:
+        # Reserve synchronously, before starting a thread: rapid clicks and
+        # scheduler wakeups must not queue several runs behind the same lock.
+        schedule = self.schedule_state if scheduled_run else None
+        if not self.run_lock.acquire(blocking=False):
+            if scheduled_run:
+                schedule.finish(scheduled_run, False, local_now())
             self.notify("评课任务正在运行，请稍候。")
-            return
-        threading.Thread(target=self._execute, daemon=True).start()
+            return False
+        try:
+            current = settings if settings is not None else Settings.load()
+            # Capture both credentials and schedule object. Editing settings
+            # while the worker starts cannot switch the claimed job's account.
+            threading.Thread(target=self._execute,
+                             args=(current, scheduled_run, schedule), daemon=True).start()
+        except Exception as exc:
+            self.run_lock.release()
+            if scheduled_run:
+                schedule.finish(scheduled_run, False, local_now())
+            logging.exception("无法启动评课任务")
+            self.notify(f"无法启动任务：{exc}")
+            self.schedule_changed.set()
+            return False
+        return True
 
-    def _run_scheduled(self, slot: ScheduledRun) -> None:
-        threading.Thread(target=self._execute, args=(slot,), daemon=True).start()
-
-    def _execute(self, scheduled_run: ScheduledRun | None = None) -> None:
-        with self.run_lock:
+    def _execute(self, current: Settings, scheduled_run: ScheduledRun | None = None,
+                 schedule: ScheduleState | None = None) -> None:
+        try:
             self.last_status = "正在运行…"
             self.icon.update_menu()
+            current.validate()
+            count = run_evaluation(current.account, current.password)
+            if scheduled_run:
+                schedule.finish(scheduled_run, True, local_now())
+            pending = len(EvaluationState.for_account(current.account).snapshot()["pending"])
+            self.last_status = f"上次运行：{local_now():%m-%d %H:%M}，待处理 {pending} 门"
+            self.notify(f"本轮完成 {count} 门，另有 {pending} 门待处理，程序将按计划重试。" if pending else f"评课完成，共处理 {count} 门。")
+        except Exception as exc:
+            logging.exception("自动评课失败")
+            if scheduled_run:
+                schedule.finish(scheduled_run, False, local_now())
+            self.last_status = f"运行失败：{local_now():%m-%d %H:%M}"
+            self.notify(f"运行失败：{exc}")
+        finally:
             try:
-                current = Settings.load()
-                current.validate()
-                count = run_evaluation(current.account, current.password)
-                if scheduled_run:
-                    self.schedule_state.finish(scheduled_run, True, datetime.now())
-                self.last_status = f"上次运行成功：{datetime.now():%m-%d %H:%M}"
-                self.notify(f"任务完成，共处理 {count} 门待评课程。")
-            except Exception as exc:
-                logging.exception("自动评课失败")
-                if scheduled_run:
-                    self.schedule_state.finish(scheduled_run, False, datetime.now())
-                self.last_status = f"运行失败：{datetime.now():%m-%d %H:%M}"
-                self.notify(f"运行失败：{exc}")
-            finally:
                 self.icon.update_menu()
-                if scheduled_run:
-                    self.schedule_changed.set()
+            finally:
+                self.run_lock.release()
+                self.schedule_changed.set()
 
     def _schedule_loop(self) -> None:
         while not self.stop_event.is_set():
-            settings = Settings.load()
             try:
-                now = datetime.now()
-                scheduled_run = self.schedule_state.claim_due_run(now, settings.run_time)
-                if scheduled_run:
-                    self._run_scheduled(scheduled_run)
+                settings = Settings.load()
+                settings.validate()
+                if self.run_lock.locked():
+                    self.schedule_changed.wait(1)
+                    self.schedule_changed.clear()
                     continue
-                target = self.schedule_state.next_wakeup(now, settings.run_time)
-                wait_seconds = schedule_wait_seconds(now, target)
-            except ValueError:
+                progress = EvaluationState.for_account(settings.account)
+                now = local_now()
+                if self._schedule_account != settings.account:
+                    # A surviving CLI worker also uses this lock; never recover
+                    # its live submission as if it were an interrupted process.
+                    with progress.run_lock():
+                        schedule = ScheduleState(progress.path.with_suffix(".schedule.json"))
+                        schedule.recover_interrupted_runs(now)
+                    self.schedule_state = schedule
+                    self._schedule_account = settings.account
+                # Independent of the normal daily slot and its retry budget.
+                # Prioritize the evening deadline if several jobs are overdue.
+                extra = progress.extra_jobs(now)
+                scheduled_run = None
+                for name, target in extra:
+                    scheduled_run = self.schedule_state.claim_target(now, name, target)
+                    if scheduled_run:
+                        break
+                if scheduled_run is None:
+                    scheduled_run = self.schedule_state.claim_due_run(now, settings.run_time)
+                if scheduled_run:
+                    self._run_scheduled(scheduled_run, settings)
+                    # Allow the worker to acquire the run lock before polling.
+                    self.schedule_changed.wait(1)
+                    self.schedule_changed.clear()
+                    continue
+                targets = [self.schedule_state.next_wakeup(now, settings.run_time)]
+                for name, target in extra:
+                    wake = self.schedule_state.target_wakeup(now, name, target)
+                    if wake:
+                        targets.append(wake)
+                # At midnight create the next day's independently randomized jobs.
+                targets.append(now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1))
+                wait_seconds = schedule_wait_seconds(now, min(targets))
+            except Exception:
+                logging.exception("评课计划检查失败")
                 wait_seconds = 60
             if self.schedule_changed.wait(wait_seconds):
                 self.schedule_changed.clear()
-                continue
 
     def open_settings(self, first_run: bool = False) -> None:
         with self._settings_lock:

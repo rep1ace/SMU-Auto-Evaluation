@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .evaluation_state import atomic_write
+
 
 # A failed request can be transient, but continuously retrying it while the
 # tray process is running (or each time it is restarted) is surprising and can
@@ -23,7 +25,7 @@ SCHEDULE_RECHECK_INTERVAL = timedelta(seconds=60)
 
 @dataclass(frozen=True)
 class ScheduledRun:
-    """The one daily schedule slot currently being executed."""
+    """A daily, course retry, or evening schedule slot being executed."""
 
     date: str
     run_time: str
@@ -70,16 +72,16 @@ class ScheduleState:
     def _read(self) -> dict[str, dict[str, object]]:
         try:
             data = json.loads(self.path.read_text(encoding="utf-8"))
-            slots = data.get("slots", {})
-            return slots if isinstance(slots, dict) else {}
-        except (FileNotFoundError, OSError, json.JSONDecodeError):
+        except FileNotFoundError:
             return {}
+        except (ValueError, UnicodeError) as exc:
+            raise ValueError("调度状态文件损坏，未重置已完成任务") from exc
+        if not isinstance(data, dict) or data.get("version") != 1 or not isinstance(data.get("slots"), dict):
+            raise ValueError("调度状态文件格式无效")
+        return data["slots"]
 
     def _write(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(f"{self.path.suffix}.tmp")
-        temporary.write_text(json.dumps({"version": 1, "slots": self._slots}, ensure_ascii=False), encoding="utf-8")
-        temporary.replace(self.path)
+        atomic_write(self.path, {"version": 1, "slots": self._slots})
 
     @staticmethod
     def _slot(now: datetime, run_time: str) -> tuple[ScheduledRun, datetime]:
@@ -110,7 +112,12 @@ class ScheduleState:
     def claim_due_run(self, now: datetime, run_time: str) -> ScheduledRun | None:
         """Atomically claim today's due automatic run, if it is eligible."""
         slot, target = self._slot(now, run_time)
-        if now < target:
+        return self.claim_target(now, slot.run_time, target)
+
+    def claim_target(self, now: datetime, name: str, target: datetime) -> ScheduledRun | None:
+        """Claim a persisted course retry or evening job using the same retry budget."""
+        slot = ScheduledRun(now.date().isoformat(), name)
+        if target.date() != now.date() or now < target:
             return None
         with self._lock:
             self._prune(now)
@@ -149,18 +156,45 @@ class ScheduleState:
             record["updated_at"] = self._timestamp(now)
             self._write()
 
-    def next_wakeup(self, now: datetime, run_time: str) -> datetime:
-        """Return the next scheduled time or an eligible retry time."""
-        slot, target = self._slot(now, run_time)
+    def recover_interrupted_runs(self, now: datetime) -> None:
+        """Recover at process startup, while holding this account's run lock.
+
+        The OS lock proves no old worker is still submitting. An interrupted
+        attempt can therefore be checked immediately, without a two-hour wait.
+        """
+        with self._lock:
+            changed = False
+            for record in self._slots.values():
+                if (isinstance(record, dict) and record.get("date") == now.date().isoformat()
+                        and record.get("status") == "in_progress"):
+                    record["status"] = "failed"
+                    attempts = record.get("attempts", 1)
+                    record["attempts"] = max(0, attempts - 1) if isinstance(attempts, int) else 0
+                    record["updated_at"] = self._timestamp(now - RETRY_DELAY)
+                    changed = True
+            if changed:
+                self._write()
+
+    def target_wakeup(self, now: datetime, name: str, target: datetime) -> datetime | None:
+        slot = ScheduledRun(now.date().isoformat(), name)
         with self._lock:
             record = self._slots.get(slot.key)
-            if now >= target and isinstance(record, dict):
+            if isinstance(record, dict):
                 status = record.get("status")
                 attempts = record.get("attempts", 0)
                 attempts = attempts if isinstance(attempts, int) else 0
                 updated_at = self._record_time(record)
-                if status == "failed" and updated_at and attempts < MAX_AUTOMATIC_ATTEMPTS:
+                if status == "succeeded" or attempts >= MAX_AUTOMATIC_ATTEMPTS:
+                    return None
+                if status == "failed" and updated_at:
                     return max(now, updated_at + RETRY_DELAY)
                 if status == "in_progress" and updated_at:
                     return max(now, updated_at + IN_PROGRESS_TIMEOUT)
-        return next_run(now, run_time)
+        return max(now, target)
+
+    def next_wakeup(self, now: datetime, run_time: str) -> datetime:
+        """Return the next scheduled time or an eligible retry time."""
+        slot, target = self._slot(now, run_time)
+        if slot.key not in self._slots:
+            return next_run(now, run_time)
+        return self.target_wakeup(now, slot.run_time, target) or next_run(now, run_time)
