@@ -2,3 +2,7 @@
 config.ini
 .DS_Store
 uv.lock
+
+__pycache__/
+.pytest_cache/
+work/
