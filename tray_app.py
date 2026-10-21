@@ -226,7 +226,7 @@ class TrayApplication:
                 tk.StringVar(master=root, value=settings.password),
                 tk.StringVar(master=root, value=settings.run_time),
             ]
-            for row, label in enumerate(("账号", "密码", "每日运行时间")):
+            for row, label in enumerate(("账号", "密码", "每日运行时间（延后 0–30 分钟）")):
                 ttk.Label(frame, text=label).grid(row=row, column=0, sticky="w", pady=6)
                 ttk.Entry(frame, textvariable=values[row], width=30, show="*" if row == 1 else "").grid(row=row, column=1, pady=6)
             startup = tk.BooleanVar(master=root, value=settings.run_at_startup)
